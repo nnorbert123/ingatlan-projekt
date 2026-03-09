@@ -1,0 +1,714 @@
+// ====================================
+// INGATLANOK ROUTES - CRUD mûveletek
+// ====================================
+
+const express = require('express');
+const router = express.Router();
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { body, validationResult } = require('express-validator');
+const { promisePool } = require('../config/database');
+const auth = require('../middleware/auth');
+const { sendPropertySuspendedEmail } = require('../services/emailService');
+
+// ====================================
+// KÉPFELTÖLTÉS KONFIGURÁCIÓ
+// ====================================
+
+const uploadDir = './uploads/properties';
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, 'ingatlan-' + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const upload = multer({
+    storage: storage,
+    limits: {
+        fileSize: parseInt(process.env.MAX_FILE_SIZE) || 52428800 // 5MB
+    },
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = /jpeg|jpg|png|webp/;
+        const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = allowedTypes.test(file.mimetype);
+        if (extname && mimetype) {
+            return cb(null, true);
+        } else {
+            cb(new Error('Csak kép fájlok (JPEG, PNG, WEBP) tölthetõk fel'));
+        }
+    }
+});
+
+// ====================================
+// ÖSSZES INGATLAN LEKÉRÉSE (lapozással)
+// GET /api/properties
+// ====================================
+
+router.get('/', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 12;
+        const offset = (page - 1) * limit;
+
+        const { tipus, tranzakcio_tipus, varos, min_ar, max_ar, includeInactive } = req.query;
+
+        let whereClauses = [];
+        if (includeInactive !== 'true') {
+            whereClauses.push('i.statusz = "aktiv"');
+        }
+        let queryParams = [];
+
+        if (tipus && tipus !== '') {
+            whereClauses.push('i.tipus = ?');
+            queryParams.push(tipus);
+        }
+
+        if (tranzakcio_tipus && tranzakcio_tipus !== '') {
+            whereClauses.push('i.tranzakcio_tipus = ?');
+            queryParams.push(tranzakcio_tipus);
+        }
+
+        if (varos && varos !== '') {
+            whereClauses.push('i.varos LIKE ?');
+            queryParams.push(`%${varos}%`);
+        }
+
+        if (min_ar && min_ar !== '') {
+            whereClauses.push('i.ar >= ?');
+            queryParams.push(parseFloat(min_ar));
+        }
+
+        if (max_ar && max_ar !== '') {
+            const maxPrice = parseFloat(max_ar);
+            if (maxPrice < 999999999999) {
+                whereClauses.push('i.ar <= ?');
+                queryParams.push(maxPrice);
+            }
+        }
+
+        const whereClause = whereClauses.length > 0 ? whereClauses.join(' AND ') : '1=1';
+
+        const [countResult] = await promisePool.query(
+            `SELECT COUNT(*) as total FROM ingatlanok i WHERE ${whereClause}`,
+            queryParams
+        );
+        const total = countResult[0].total;
+
+        const [properties] = await promisePool.query(`
+            SELECT 
+                i.*,
+                f.nev AS hirdeto_nev,
+                f.telefon AS hirdeto_telefon,
+                f.email AS hirdeto_email,
+                GROUP_CONCAT(k.fajl_utvonal ORDER BY k.sorrend) AS kepek,
+                COALESCE(
+                    (SELECT fajl_utvonal FROM kepek WHERE ingatlan_id = i.id AND fo_kep = TRUE LIMIT 1),
+                    (SELECT fajl_utvonal FROM kepek WHERE ingatlan_id = i.id ORDER BY sorrend LIMIT 1)
+                ) AS fo_kep
+            FROM ingatlanok i
+            LEFT JOIN felhasznalok f ON i.felhasznalo_id = f.id
+            LEFT JOIN kepek k ON i.id = k.ingatlan_id
+            WHERE ${whereClause}
+            GROUP BY i.id
+            ORDER BY i.kiemelt DESC, i.frissitve DESC
+            LIMIT ? OFFSET ?
+        `, [...queryParams, limit, offset]);
+
+        res.json({
+            success: true,
+            data: properties,
+            pagination: {
+                total,
+                page,
+                limit,
+                pages: Math.ceil(total / limit)
+            }
+        });
+
+    } catch (error) {
+        console.error('Ingatlanok lekérése hiba:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Szerverhiba történt az ingatlanok lekérése során'
+        });
+    }
+});
+
+// ====================================
+// SAJÁT INGATLANOK LEKÉRÉSE
+// GET /api/properties/my/listings
+// FONTOS: Ez a route a /:id ELÕTT van definiálva!
+// ====================================
+
+router.get('/my/listings', auth, async (req, res) => {
+    try {
+        const [properties] = await promisePool.query(`
+            SELECT 
+                i.*,
+                GROUP_CONCAT(k.fajl_utvonal ORDER BY k.sorrend) AS kepek,
+                COALESCE(
+                    (SELECT fajl_utvonal FROM kepek WHERE ingatlan_id = i.id AND fo_kep = TRUE LIMIT 1),
+                    (SELECT fajl_utvonal FROM kepek WHERE ingatlan_id = i.id ORDER BY sorrend LIMIT 1)
+                ) AS fo_kep
+            FROM ingatlanok i
+            LEFT JOIN kepek k ON i.id = k.ingatlan_id
+            WHERE i.felhasznalo_id = ?
+            GROUP BY i.id
+            ORDER BY i.letrehozva DESC
+        `, [req.user.id]);
+
+        res.json({
+            success: true,
+            data: properties
+        });
+
+    } catch (error) {
+        console.error('Saját ingatlanok lekérése hiba:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Szerverhiba történt'
+        });
+    }
+});
+
+// ====================================
+// EGY INGATLAN LEKÉRÉSE ID alapján
+// GET /api/properties/:id
+// ====================================
+
+router.get('/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const [properties] = await promisePool.query(`
+            SELECT 
+                i.*,
+                f.id AS hirdeto_id,
+                f.nev AS hirdeto_nev,
+                f.telefon AS hirdeto_telefon,
+                f.email AS hirdeto_email,
+                f.profilkep AS hirdeto_profilkep
+            FROM ingatlanok i
+            LEFT JOIN felhasznalok f ON i.felhasznalo_id = f.id
+            WHERE i.id = ?
+        `, [id]);
+
+        if (properties.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Az ingatlan nem található'
+            });
+        }
+
+        const [images] = await promisePool.query(
+            'SELECT * FROM kepek WHERE ingatlan_id = ? ORDER BY sorrend',
+            [id]
+        );
+
+        // ====================================
+        // MEGTEKINTÉS TRACKING
+        // ====================================
+
+        const ipAddress = req.headers['x-forwarded-for']?.split(',')[0].trim() ||
+                         req.headers['x-real-ip'] ||
+                         req.connection.remoteAddress ||
+                         req.socket.remoteAddress;
+
+        const userAgent = req.headers['user-agent'] || 'Unknown';
+        const userId = req.user ? req.user.id : null;
+        const sessionId = req.sessionID || null;
+        const propertyOwnerId = properties[0].felhasznalo_id;
+        const isOwner = userId && userId === propertyOwnerId;
+
+        if (!isOwner) {
+            const [existingViews] = await promisePool.query(`
+                SELECT id FROM ingatlan_megtekintesek 
+                WHERE ingatlan_id = ? 
+                AND ip_cim = ?
+                AND megtekintve_datum >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+                LIMIT 1
+            `, [id, ipAddress]);
+
+            if (existingViews.length === 0) {
+                await promisePool.query(`
+                    INSERT INTO ingatlan_megtekintesek 
+                    (ingatlan_id, ip_cim, user_agent, felhasznalo_id, session_id)
+                    VALUES (?, ?, ?, ?, ?)
+                `, [id, ipAddress, userAgent, userId, sessionId]);
+
+                await promisePool.query(`
+                    UPDATE ingatlanok 
+                    SET megtekintesek = (
+                        SELECT COUNT(DISTINCT ip_cim) 
+                        FROM ingatlan_megtekintesek 
+                        WHERE ingatlan_id = ?
+                    )
+                    WHERE id = ?
+                `, [id, id]);
+
+                const [updated] = await promisePool.query(
+                    'SELECT megtekintesek FROM ingatlanok WHERE id = ?',
+                    [id]
+                );
+                properties[0].megtekintesek = updated[0].megtekintesek;
+            }
+        }
+
+        res.json({
+            success: true,
+            data: {
+                property: properties[0],
+                images: images
+            }
+        });
+
+    } catch (error) {
+        console.error('Ingatlan részletek lekérése hiba:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Szerverhiba történt'
+        });
+    }
+});
+
+// ====================================
+// ÚJ INGATLAN LÉTREHOZÁSA
+// POST /api/properties
+// ====================================
+
+router.post('/', [auth, upload.array('images', 10)], async (req, res) => {
+    try {
+        const {
+            cim, leiras, tipus, tranzakcio_tipus, ar, penznem,
+            varos, kerulet, iranyitoszam, utca, hazszam,
+            alapterulet, szobak_szama, furdok_szama, emelet,
+            osszkomfort, epitesi_ev, allapot, extrak
+        } = req.body;
+
+        // Kötelezõ mezõk ellenõrzése
+        if (!cim || !ar || !varos || !alapterulet) {
+            return res.status(400).json({
+                success: false,
+                message: 'Hiányzó kötelezõ mezõk: cim, ar, varos, alapterulet'
+            });
+        }
+
+        const [result] = await promisePool.query(`
+            INSERT INTO ingatlanok (
+                felhasznalo_id, cim, leiras, tipus, tranzakcio_tipus, ar, penznem,
+                varos, kerulet, iranyitoszam, utca, hazszam,
+                alapterulet, szobak_szama, furdok_szama, emelet,
+                osszkomfort, epitesi_ev, allapot, extrak
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+            req.user.id,
+            cim,
+            leiras || '',
+            tipus || 'lakas',
+            tranzakcio_tipus || 'elado',
+            ar,
+            penznem || 'HUF',
+            varos,
+            kerulet || null,
+            iranyitoszam || null,
+            utca || null,
+            hazszam || null,
+            alapterulet,
+            szobak_szama || null,
+            furdok_szama || null,
+            emelet || null,
+            osszkomfort === 'true' || osszkomfort === true || osszkomfort === 1 ? 1 : 0,
+            epitesi_ev || null,
+            allapot || 'felujitando',
+            extrak ? (typeof extrak === 'string' ? extrak : JSON.stringify(extrak)) : null
+        ]);
+
+        const propertyId = result.insertId;
+
+        // Képek mentése
+        if (req.files && req.files.length > 0) {
+            for (let i = 0; i < req.files.length; i++) {
+                const file = req.files[i];
+                await promisePool.query(`
+                    INSERT INTO kepek (ingatlan_id, fajlnev, fajl_utvonal, sorrend, fo_kep)
+                    VALUES (?, ?, ?, ?, ?)
+                `, [propertyId, file.filename, `/uploads/properties/${file.filename}`, i, i === 0 ? 1 : 0]);
+            }
+        }
+
+        res.status(201).json({
+            success: true,
+            message: 'Az ingatlan sikeresen létrehozva',
+            data: { id: propertyId }
+        });
+
+    } catch (error) {
+        console.error('Ingatlan létrehozása hiba:', error.message, error.stack);
+        res.status(500).json({
+            success: false,
+            message: 'Szerverhiba történt az ingatlan létrehozása során'
+        });
+    }
+});
+
+// ====================================
+// INGATLAN FRISSÍTÉSE
+// PUT /api/properties/:id
+// ====================================
+
+router.put('/:id', auth, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const [properties] = await promisePool.query(
+            'SELECT felhasznalo_id FROM ingatlanok WHERE id = ?',
+            [id]
+        );
+
+        if (properties.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Az ingatlan nem található'
+            });
+        }
+
+        if (properties[0].felhasznalo_id !== req.user.id && req.user.szerepkor !== 'admin') {
+            return res.status(403).json({
+                success: false,
+                message: 'Nincs jogosultságod ehhez a mûvelethez'
+            });
+        }
+
+        const updateFields = [];
+        const updateValues = [];
+
+        // ====================================
+        // JAVÍTÁS: Minden mezõ amit az EditProperty.js és Admin küldhet
+        // ====================================
+        const allowedFields = [
+            'cim', 'leiras', 'tipus', 'tranzakcio_tipus', 'ar', 'penznem',
+            'varos', 'kerulet', 'iranyitoszam', 'utca', 'hazszam',
+            'alapterulet', 'szobak_szama', 'furdok_szama', 'emelet',
+            'osszkomfort', 'epitesi_ev', 'allapot', 'extrak',
+            'statusz', 'felfuggesztve_indok', 'felfuggesztve_datum',
+            'kiemelt', 'lefoglalva'
+        ];
+
+        const integerFields = ['szobak_szama', 'furdok_szama', 'emelet', 'epitesi_ev', 'ar', 'alapterulet'];
+        const booleanFields = ['osszkomfort', 'kiemelt', 'lefoglalva'];
+
+        allowedFields.forEach(field => {
+            if (req.body[field] !== undefined) {
+                updateFields.push(`${field} = ?`);
+
+                if (field === 'felfuggesztve_datum' && req.body[field]) {
+                    const date = new Date(req.body[field]);
+                    updateValues.push(date.toISOString().slice(0, 19).replace('T', ' '));
+                } else if (field === 'extrak') {
+                    const val = req.body[field];
+                    if (val === null || val === '') {
+                        updateValues.push(null);
+                    } else {
+                        updateValues.push(typeof val === 'string' ? val : JSON.stringify(val));
+                    }
+                } else if (booleanFields.includes(field)) {
+                    const val = req.body[field];
+                    updateValues.push(
+                        val === true || val === 'true' || val === 1 || val === '1' ? 1 : 0
+                    );
+                } else if (integerFields.includes(field)) {
+                    updateValues.push(req.body[field] === '' ? null : req.body[field]);
+                } else {
+                    updateValues.push(req.body[field]);
+                }
+            }
+        });
+
+        if (updateFields.length === 0) {
+            return res.json({
+                success: true,
+                message: 'Nincs frissítendõ adat'
+            });
+        }
+
+        updateValues.push(id);
+        await promisePool.query(
+            `UPDATE ingatlanok SET ${updateFields.join(', ')} WHERE id = ?`,
+            updateValues
+        );
+
+        // Ha felfüggesztés történt, email küldés (nem blokkolja a választ)
+        if (req.body.statusz === 'inaktiv' && req.body.felfuggesztve_indok) {
+            (async () => {
+                try {
+                    const [propertyData] = await promisePool.query(`
+                        SELECT i.cim, f.nev, f.email 
+                        FROM ingatlanok i
+                        JOIN felhasznalok f ON i.felhasznalo_id = f.id
+                        WHERE i.id = ?
+                    `, [id]);
+
+                    if (propertyData.length > 0) {
+                        await sendPropertySuspendedEmail(
+                            propertyData[0].email,
+                            propertyData[0].nev,
+                            propertyData[0].cim,
+                            req.body.felfuggesztve_indok
+                        );
+                    }
+                } catch (emailError) {
+                    console.error('Felfüggesztés email küldési hiba:', emailError);
+                }
+            })();
+        }
+
+        res.json({
+            success: true,
+            message: 'Az ingatlan sikeresen frissítve'
+        });
+
+    } catch (error) {
+        console.error('Ingatlan frissítése hiba:', error.message, error.stack);
+        res.status(500).json({
+            success: false,
+            message: 'Szerverhiba történt az ingatlan frissítése során'
+        });
+    }
+});
+
+// ====================================
+// KÉPEK HOZZÁADÁSA MEGLÉVÕ HIRDETÉSHEZ
+// POST /api/properties/:id/images
+// ====================================
+
+router.post('/:id/images', [auth, upload.array('images', 30)], async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const [properties] = await promisePool.query('SELECT * FROM ingatlanok WHERE id = ?', [id]);
+        if (properties.length === 0) {
+            return res.status(404).json({ success: false, message: 'Ingatlan nem található' });
+        }
+
+        if (properties[0].felhasznalo_id !== req.user.id && req.user.szerepkor !== 'admin') {
+            return res.status(403).json({ success: false, message: 'Nincs jogosultságod' });
+        }
+
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ success: false, message: 'Nincs feltöltött kép' });
+        }
+
+        const [existingImages] = await promisePool.query(
+            'SELECT * FROM kepek WHERE ingatlan_id = ? ORDER BY sorrend',
+            [id]
+        );
+        let nextOrder = existingImages.length;
+
+        for (const file of req.files) {
+            await promisePool.query(
+                'INSERT INTO kepek (ingatlan_id, fajlnev, fajl_utvonal, sorrend, fo_kep) VALUES (?, ?, ?, ?, ?)',
+                [id, file.filename, `/uploads/properties/${file.filename}`, nextOrder, nextOrder === 0 ? 1 : 0]
+            );
+            nextOrder++;
+        }
+
+        res.json({ success: true, message: 'Képek sikeresen hozzáadva' });
+
+    } catch (error) {
+        console.error('Képek hozzáadása hiba:', error);
+        res.status(500).json({ success: false, message: 'Szerverhiba' });
+    }
+});
+
+// ====================================
+// EGY KÉP TÖRLÉSE
+// DELETE /api/properties/:id/images/:imageId
+// ====================================
+
+router.delete('/:id/images/:imageId', auth, async (req, res) => {
+    try {
+        const { id, imageId } = req.params;
+
+        const [properties] = await promisePool.query('SELECT * FROM ingatlanok WHERE id = ?', [id]);
+        if (properties.length === 0) {
+            return res.status(404).json({ success: false, message: 'Ingatlan nem található' });
+        }
+
+        if (properties[0].felhasznalo_id !== req.user.id && req.user.szerepkor !== 'admin') {
+            return res.status(403).json({ success: false, message: 'Nincs jogosultságod' });
+        }
+
+        const [images] = await promisePool.query(
+            'SELECT * FROM kepek WHERE id = ? AND ingatlan_id = ?',
+            [imageId, id]
+        );
+        if (images.length === 0) {
+            return res.status(404).json({ success: false, message: 'Kép nem található' });
+        }
+
+        const image = images[0];
+
+        // Fájl fizikai törlése
+        const filePath = path.join(__dirname, '..', 'uploads', 'properties', image.fajlnev);
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+        }
+
+        await promisePool.query('DELETE FROM kepek WHERE id = ?', [imageId]);
+
+        res.json({ success: true, message: 'Kép sikeresen törölve' });
+
+    } catch (error) {
+        console.error('Kép törlése hiba:', error);
+        res.status(500).json({ success: false, message: 'Szerverhiba' });
+    }
+});
+
+// ====================================
+// INGATLAN TÖRLÉSE
+// DELETE /api/properties/:id
+// ====================================
+
+router.delete('/:id', auth, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const [properties] = await promisePool.query(
+            'SELECT felhasznalo_id FROM ingatlanok WHERE id = ?',
+            [id]
+        );
+
+        if (properties.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Az ingatlan nem található'
+            });
+        }
+
+        if (properties[0].felhasznalo_id !== req.user.id && req.user.szerepkor !== 'admin') {
+            return res.status(403).json({
+                success: false,
+                message: 'Nincs jogosultságod ehhez a mûvelethez'
+            });
+        }
+
+        // Képek lekérése fizikai törléshez
+        const [images] = await promisePool.query(
+            'SELECT fajlnev, fajl_utvonal FROM kepek WHERE ingatlan_id = ?',
+            [id]
+        );
+
+        // Képek fizikai törlése
+        images.forEach(img => {
+            const filePath = path.join(__dirname, '..', 'uploads', 'properties', img.fajlnev);
+            if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+            }
+        });
+
+        // Ingatlan törlése (CASCADE miatt a képek is törlõdnek az adatbázisból)
+        await promisePool.query('DELETE FROM ingatlanok WHERE id = ?', [id]);
+
+        // AUTO_INCREMENT visszaállítása
+        try {
+            const [maxResult] = await promisePool.query('SELECT MAX(id) as max_id FROM ingatlanok');
+            const maxId = maxResult[0].max_id;
+            if (maxId === null) {
+                await promisePool.query('ALTER TABLE ingatlanok AUTO_INCREMENT = 1');
+            } else {
+                await promisePool.query('ALTER TABLE ingatlanok AUTO_INCREMENT = ?', [maxId + 1]);
+            }
+        } catch (autoIncrementError) {
+            console.warn('AUTO_INCREMENT reset warning:', autoIncrementError.message);
+        }
+
+        res.json({
+            success: true,
+            message: 'Az ingatlan sikeresen törölve'
+        });
+
+    } catch (error) {
+        console.error('Ingatlan törlése hiba:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Szerverhiba történt az ingatlan törlése során'
+        });
+    }
+});
+
+// ====================================
+// LEFOGLALÁS KEZELÉS
+// ====================================
+
+// PUT /api/properties/:id/reserve
+router.put('/:id/reserve', auth, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const [property] = await promisePool.query(
+            'SELECT felhasznalo_id, cim FROM ingatlanok WHERE id = ?',
+            [id]
+        );
+
+        if (property.length === 0) {
+            return res.status(404).json({ success: false, message: 'Ingatlan nem található' });
+        }
+
+        if (req.user.szerepkor !== 'admin' && property[0].felhasznalo_id !== req.user.id) {
+            return res.status(403).json({ success: false, message: 'Nincs jogosultságod ehhez a mûvelethez' });
+        }
+
+        await promisePool.query(
+            'UPDATE ingatlanok SET lefoglalva = TRUE, lefoglalva_datum = NOW() WHERE id = ?',
+            [id]
+        );
+
+        res.json({ success: true, message: 'Ingatlan lefoglalva' });
+
+    } catch (error) {
+        console.error('Reserve property error:', error);
+        res.status(500).json({ success: false, message: 'Hiba az ingatlan lefoglalásakor' });
+    }
+});
+
+// PUT /api/properties/:id/unreserve
+router.put('/:id/unreserve', auth, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const [property] = await promisePool.query(
+            'SELECT felhasznalo_id, cim FROM ingatlanok WHERE id = ?',
+            [id]
+        );
+
+        if (property.length === 0) {
+            return res.status(404).json({ success: false, message: 'Ingatlan nem található' });
+        }
+
+        if (req.user.szerepkor !== 'admin' && property[0].felhasznalo_id !== req.user.id) {
+            return res.status(403).json({ success: false, message: 'Nincs jogosultságod ehhez a mûvelethez' });
+        }
+
+        await promisePool.query(
+            'UPDATE ingatlanok SET lefoglalva = FALSE, lefoglalva_datum = NULL WHERE id = ?',
+            [id]
+        );
+
+        res.json({ success: true, message: 'Lefoglalás visszavonva' });
+
+    } catch (error) {
+        console.error('Unreserve property error:', error);
+        res.status(500).json({ success: false, message: 'Hiba a lefoglalás visszavonásakor' });
+    }
+});
+
+module.exports = router;

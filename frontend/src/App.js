@@ -1,0 +1,84 @@
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { ToastContainer } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
+
+// Components
+import Navbar from './components/Navbar';
+import Footer from './components/Footer';
+import ScrollToTop from './components/ScrollToTop';
+import Home from './pages/Home';
+import Properties from './pages/Properties';
+import PropertyDetail from './pages/PropertyDetail';
+import Search from './pages/Search';
+import Login from './pages/Login';
+import Register from './pages/Register';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
+import Dashboard from './pages/Dashboard';
+import AddProperty from './pages/AddProperty';
+import EditProperty from './pages/EditProperty';
+import EditProfile from './pages/EditProfile';
+import Favorites from './pages/Favorites';
+import Messages from './pages/Messages';
+import Chat from './pages/Chat';
+import Notifications from './pages/Notifications';
+import Analytics from './pages/Analytics';
+import Admin from './pages/Admin';
+import NotFound from './pages/NotFound';
+import ProtectedRoute from './components/ProtectedRoute';
+import EmailVerification from './pages/EmailVerification';
+// Context
+import { AuthProvider } from './context/AuthContext';
+// Styles
+import './App.css';
+function App() {
+  return (
+    <AuthProvider>
+      <Router>
+        <div className="App">
+          <Navbar />
+          <main className="main-content">
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/ingatlanok" element={<Properties />} />
+              <Route path="/ingatlan/:id" element={<PropertyDetail />} />
+              <Route path="/kereses" element={<Search />} />
+              <Route path="/bejelentkezes" element={<Login />} />
+              <Route path="/regisztracio" element={<Register />} />
+              <Route path="/elfelejtett-jelszo" element={<ForgotPassword />} />
+              <Route path="/jelszo-visszaallitas" element={<ResetPassword />} />
+              <Route path="/profil" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+              <Route path="/profil/szerkesztes" element={<ProtectedRoute><EditProfile /></ProtectedRoute>} />
+              <Route path="/hirdetes-feladas" element={<ProtectedRoute><AddProperty /></ProtectedRoute>} />
+              <Route path="/hirdetes-szerkesztes/:id" element={<EditProperty />} />
+              <Route path="/kedvencek" element={<ProtectedRoute><Favorites /></ProtectedRoute>} />
+              <Route path="/uzenetek" element={<ProtectedRoute><Messages /></ProtectedRoute>} />
+              <Route path="/chat/:userId" element={<Chat />} />
+              <Route path="/ertesitesek" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
+              <Route path="/statisztikak" element={<ProtectedRoute><Analytics /></ProtectedRoute>} />
+              <Route path="/admin" element={<ProtectedRoute adminOnly={true}><Admin /></ProtectedRoute>} />
+              <Route path="*" element={<NotFound />} />
+	      <Route path="/email-megerosites" element={<EmailVerification />} />
+            </Routes>
+          </main>
+          <Footer />
+          <ScrollToTop />
+          <ToastContainer
+            position="top-right"
+            autoClose={3000}
+            hideProgressBar={false}
+            newestOnTop
+            closeOnClick
+            rtl={false}
+            pauseOnFocusLoss
+            draggable
+            pauseOnHover
+            theme="colored"
+          />
+        </div>
+      </Router>
+    </AuthProvider>
+  );
+}
+export default App;
