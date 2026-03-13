@@ -11445,3 +11445,39 @@ h1, h2, h3, h4, h5, h6,
   font-family: 'Playfair Display', serif !important;
   letter-spacing: normal !important;
 }
+
+/* ========== SEARCH BTN – NO BACKGROUND, NO HOVER ========== */
+
+.search-btn {
+  background: transparent !important;
+  border: none !important;
+  border-left: none !important;
+  border-radius: 0 2rem 2rem 0 !important;
+  box-shadow: none !important;
+  transition: none !important;
+  transform: none !important;
+}
+
+.search-btn:hover,
+.search-btn:active,
+.search-btn:focus {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  transform: none !important;
+  outline: none !important;
+}
+
+.search-btn svg {
+  color: #94a3b8 !important;
+}
+
+/* Input – fehér háttér, hover nélkül */
+.search-input {
+  background: white !important;
+}
+
+.search-input:focus {
+  background: white !important;
+  box-shadow: none !important;
+}
