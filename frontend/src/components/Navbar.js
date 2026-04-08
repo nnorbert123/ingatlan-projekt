@@ -19,6 +19,7 @@ const DOCS = [
   { label: 'Összefoglaló',             url: 'https://docs.google.com/document/d/1cMSIWEaAhoboGFKDTREw__beykkiY-2P/edit' },
   { label: 'Tesztdokumentáció',        url: 'https://docs.google.com/document/d/1RQpO2urIeqjZUnI3dSKKKZO0f85kqP3V/edit?rtpof=true' },
   { label: 'Táblázat',                 url: 'https://docs.google.com/spreadsheets/d/14t5h8G-j0KUwzPJt13cxfbBPWMCp-Vdh/edit?gid=1461233650#gid=1461233650' },
+  { label: 'Diagram',		       url: 'https://drive.google.com/file/d/1ADVRsHKD5krJduCeAjQDmWyl3qQnGU-f/view?usp=drive_link' },
 ];
 
 const Navbar = () => {
